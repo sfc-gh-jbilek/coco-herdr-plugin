@@ -170,6 +170,136 @@ report() {
   herdr_call "${args[@]}"
 }
 
+# Cortex writes the conversation title as an OSC title, "<title> (cortex)".
+# Herdr shows that on the tab only after a rename. Until then, and again after
+# a row is released, the label stays the process name. Rename from the OSC
+# title when the label is still that placeholder, or still the name this pane
+# set last. A tab that holds another pane is left alone.
+rename_tab_from_title() {
+  local raw parsed base tab_id rawtab label panes lastf last
+  command -v python3 >/dev/null 2>&1 || return 0
+  raw=$("$HERDR_BIN_PATH" pane get "$HERDR_PANE_ID" 2>/dev/null) || return 0
+  [ -n "$raw" ] || return 0
+  parsed=$(printf '%s' "$raw" | python3 -c '
+import json, re, sys
+raw = sys.stdin.read()
+i = raw.find("{")
+if i < 0:
+    sys.exit(0)
+try:
+    d = json.loads(raw[i:])
+except Exception:
+    sys.exit(0)
+p = (d.get("result") or {}).get("pane") or d.get("pane") or {}
+title = (p.get("terminal_title_stripped") or p.get("terminal_title") or "").strip()
+suffix = " (cortex)"
+if title.endswith(suffix):
+    title = title[: -len(suffix)].strip()
+title = re.sub(r"^[^0-9A-Za-z]+", "", title).strip()
+if not title or title.lower() in ("cortex", "coco"):
+    sys.exit(0)
+limit = 48
+if len(title) > limit:
+    cut = title[:limit]
+    sp = cut.rfind(" ")
+    title = (cut[:sp] if sp >= 24 else cut).rstrip()
+tab = p.get("tab_id") or ""
+if not tab or not title or title.startswith("-"):
+    sys.exit(0)
+sys.stdout.write(title + "\x1f" + tab)
+' 2>/dev/null) || return 0
+  [ -n "$parsed" ] || return 0
+  IFS=$'\x1f' read -r base tab_id <<< "$parsed"
+  [ -n "$base" ] && [ -n "$tab_id" ] || return 0
+  rawtab=$("$HERDR_BIN_PATH" tab get "$tab_id" 2>/dev/null) || return 0
+  label=$(printf '%s' "$rawtab" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+i = raw.find("{")
+if i < 0:
+    sys.exit(0)
+try:
+    d = json.loads(raw[i:])
+except Exception:
+    sys.exit(0)
+t = (d.get("result") or {}).get("tab") or d.get("tab") or {}
+sys.stdout.write((t.get("label") or "") + "\x1f" + str(t.get("pane_count") or ""))
+' 2>/dev/null) || return 0
+  panes=${label#*$'\x1f'}
+  label=${label%%$'\x1f'*}
+  # A shared tab has one label. Renaming it would retitle the other pane.
+  [ "$panes" = "1" ] || return 0
+  lastf="$SEQ_DIR/tabname.$HERDR_PANE_ID"
+  last=$(cat "$lastf" 2>/dev/null || true)
+  if [ "$label" = "$base" ]; then
+    printf '%s' "$base" > "$lastf" 2>/dev/null || true
+    return 0
+  fi
+  case "$label" in
+    ""|cortex|coco) ;;
+    *)
+      case "$label" in
+        *[!0-9]*) [ "$label" = "$last" ] || return 0 ;;
+      esac
+      ;;
+  esac
+  "$HERDR_BIN_PATH" tab rename "$tab_id" "$base" >/dev/null 2>&1 || {
+    printf '%s   herdr tab rename failed\n' "$(date '+%H:%M:%S')" >> "$LOG_FILE" 2>/dev/null || true
+    return 0
+  }
+  printf '%s' "$base" > "$lastf" 2>/dev/null || true
+  printf '%s   tab rename -> %.80s\n' "$(date '+%H:%M:%S')" "$base" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+# PID the SessionEnd watcher should follow. Cortex runs the hook under a
+# short-lived child that is not an ancestor of the Cortex process, so $PPID
+# dies while Cortex is still at the prompt and a parent walk never sees it.
+# Herdr's process list for this pane names the real cortex pid. Tests stub
+# herdr with empty stdout, so they fall through to the immediate parent.
+watch_pid() {
+  local pid comm i=0
+  if command -v python3 >/dev/null 2>&1; then
+    pid=$("$HERDR_BIN_PATH" pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+i = raw.find("{")
+if i < 0:
+    sys.exit(0)
+try:
+    d = json.loads(raw[i:])
+except Exception:
+    sys.exit(0)
+info = (d.get("result") or {}).get("process_info") or {}
+for proc in reversed(info.get("foreground_processes") or []):
+    name = proc.get("name") or ""
+    argv0 = proc.get("argv0") or ""
+    if name in ("cortex", "cortex.exe") or argv0 in ("cortex", "cortex.exe") or name.endswith("/cortex"):
+        pid = proc.get("pid")
+        if isinstance(pid, int) and pid > 1:
+            sys.stdout.write(str(pid))
+        break
+' 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s' "$pid"; return 0 ;;
+    esac
+  fi
+  pid="$PPID"
+  while [ "${pid:-0}" -gt 1 ] 2>/dev/null && [ "$i" -lt 20 ]; do
+    comm=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]')
+    case "$comm" in
+      cortex|cortex.exe) printf '%s' "$pid"; return 0 ;;
+    esac
+    pid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
+    i=$(( i + 1 ))
+  done
+  if [ "$PPID" -gt 1 ] 2>/dev/null; then
+    printf '%s' "$PPID"
+    return 0
+  fi
+  return 1
+}
+
 needs_user_attention() {
   # Notification also carries team-worker lifecycle updates. Only mark the pane
   # blocked when the message asks the user to take an action or answer a question.
@@ -186,8 +316,9 @@ needs_user_attention() {
 }
 
 case "$EVENT" in
-  SessionStart)                            report idle ;;
-  UserPromptSubmit|PreToolUse|PostToolUse) report working ;;
+  SessionStart)                            report idle; rename_tab_from_title ;;
+  UserPromptSubmit)                        report working; rename_tab_from_title ;;
+  PreToolUse|PostToolUse)                  report working ;;
   PermissionRequest)
       # Fires when CoCo asks permission to run a tool.
       report blocked "${TOOL_NAME:-awaiting approval}" ;;
@@ -204,13 +335,16 @@ case "$EVENT" in
       # Cortex fires SessionEnd on exit and on an in-process session switch
       # (/new). Releasing now would drop the row and its title on a switch.
       # Report idle with the seq + 1 reservation already stored, and release from
-      # a detached watcher once the Cortex process ($PPID) exits. Herdr ignores a
+      # a detached watcher once the Cortex process exits. Herdr ignores a
       # release whose seq is not above the last accepted, so the next
-      # SessionStart cancels it. A parent of PID 1 or below means the hook was
-      # reparented, so there is no Cortex process to watch.
+      # SessionStart cancels it. A parent of PID 1 or below, with no cortex
+      # ancestor, means the hook was reparented.
       report idle
-      if [ "$PPID" -gt 1 ] 2>/dev/null; then
-        "$BASH" "$0" __watch "$PPID" "$(( SEQ + 1 ))" </dev/null >/dev/null 2>&1 &
+      rename_tab_from_title
+      WP=$(watch_pid) || WP=
+      if [ -n "$WP" ]; then
+        printf '%s   SessionEnd: watching pid %s\n' "$(date '+%H:%M:%S')" "$WP" >> "$LOG_FILE" 2>/dev/null || true
+        "$BASH" "$0" __watch "$WP" "$(( SEQ + 1 ))" </dev/null >/dev/null 2>&1 &
       else
         printf '%s   SessionEnd: parent pid %s unusable, no watcher\n' "$(date '+%H:%M:%S')" "$PPID" >> "$LOG_FILE" 2>/dev/null || true
       fi

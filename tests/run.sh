@@ -99,7 +99,7 @@ for kind in $kinds; do
   check "$(grep -c '^edit$' "$ARGV")" "1" "$kind: tool name as permission message"
   check "$(grep -c '^awaiting input$' "$ARGV")" "0" "$kind: shell-injection notification is not a user question"
   check "$(grep -c 'whoami' "$ARGV")" "0" "$kind: prompt text not sent to Herdr"
-  check "$(grep -c '^w1:p1$' "$ARGV")" "8" "$kind: pane id verbatim"
+  check "$(grep -c '^w1:p1$' "$ARGV")" "12" "$kind: pane id verbatim"
   check "$(grep -c '^release-agent$' "$ARGV")" "0" "$kind: SessionEnd does not release while hook parent alive"
   seqs=$(grep -A1 -x -- '--seq' "$ARGV" | grep -vx -e '--seq' -e '--')
   check "$(printf '%s\n' "$seqs" | wc -l | tr -d ' ')" "8" "$kind: one seq per herdr call"

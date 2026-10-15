@@ -214,10 +214,24 @@ switch ($Event) {
                 try { $ParentId = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId } catch {}
             }
             if ([long]"0$ParentId" -gt 1) {
+                # The hook parent is often a short-lived runner. Watch the cortex
+                # process above it so the row stays until Cortex itself exits.
+                # With no such ancestor (tests), watch the immediate parent.
+                $WatchId = [long]"0$ParentId"
+                $Cursor = $WatchId
+                for ($i = 0; $i -lt 20 -and $Cursor -gt 1; $i++) {
+                    $Name = $null
+                    try { $Name = (Get-Process -Id $Cursor -ErrorAction Stop).ProcessName } catch { break }
+                    if ($Name -eq 'cortex') { $WatchId = $Cursor; break }
+                    $Next = 0
+                    try { $Next = [long](Get-CimInstance Win32_Process -Filter "ProcessId=$Cursor").ParentProcessId } catch { break }
+                    if ($Next -le 1 -or $Next -eq $Cursor) { break }
+                    $Cursor = $Next
+                }
                 # Redirect all stdio so the watcher holds none of the hook's handles.
                 $si = New-Object Diagnostics.ProcessStartInfo
                 $si.FileName = (Get-Process -Id $PID).Path
-                $si.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$PSCommandPath`" __watch $ParentId $ReleaseSeq"
+                $si.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$PSCommandPath`" __watch $WatchId $ReleaseSeq"
                 $si.UseShellExecute = $false
                 $si.CreateNoWindow = $true
                 $si.RedirectStandardInput = $true
