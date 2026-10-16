@@ -164,6 +164,8 @@ function Send-Report {
     if ($SessionId) { $a += @('--agent-session-id', $SessionId) }
     # $Message is always one argv element. PowerShell never re-parses it.
     if ($Message) { $a += @('--message', $Message) }
+    # Herdr relaunches this after a server restart. First element is a plain name.
+    if ($SessionId) { $a += @('--', 'cortex', '--resume', $SessionId) }
     Invoke-Herdr $a
 }
 

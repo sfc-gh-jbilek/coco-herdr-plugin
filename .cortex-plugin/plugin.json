@@ -1,5 +1,5 @@
 {
   "name": "coco-herdr-plugin",
   "description": "Herdr integration for Cortex Code: live idle/working/blocked status in the Herdr sidebar, a Herdr control skill, and a $coco-herdr-plugin:doctor troubleshooter. No Herdr source changes.",
-  "version": "0.2.5"
+  "version": "0.2.6"
 }

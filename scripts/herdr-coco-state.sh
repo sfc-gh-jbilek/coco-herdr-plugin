@@ -158,15 +158,70 @@ printf '%s' "$STORE" > "$SEQ_FILE.tmp.$$" 2>/dev/null && mv -f "$SEQ_FILE.tmp.$$
 printf '%s %s tool=%s [plugin]\n' "$(date '+%H:%M:%S')" "$EVENT" "$TOOL_NAME" >> "$LOG_FILE" 2>/dev/null || true
 [ "$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)" -gt 400 ] && tail -n 200 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv "$LOG_FILE.tmp" "$LOG_FILE" 2>/dev/null
 
+# Flags from the live Cortex process that a restarted session must keep.
+# --profile is also stored on the session; --bypass and --no-auto-update are
+# not. Anything else on the argv (a prompt, a path) is left out.
+resume_flags() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  "$HERDR_BIN_PATH" pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null | python3 -c '
+import json, re, sys
+raw = sys.stdin.read()
+i = raw.find("{")
+if i < 0:
+    sys.exit(0)
+try:
+    d = json.loads(raw[i:])
+except Exception:
+    sys.exit(0)
+info = (d.get("result") or {}).get("process_info") or {}
+argv = None
+for proc in reversed(info.get("foreground_processes") or []):
+    name = proc.get("name") or ""
+    argv0 = proc.get("argv0") or ""
+    if name in ("cortex", "cortex.exe") or argv0 in ("cortex", "cortex.exe") or name.endswith("/cortex"):
+        argv = proc.get("argv") or []
+        break
+if not argv:
+    sys.exit(0)
+bools = {"--bypass", "--no-auto-update"}
+vals = {"--profile"}
+safe = []
+i = 1
+while i < len(argv):
+    a = argv[i]
+    if a in bools:
+        safe.append(a)
+        i += 1
+        continue
+    if a in vals and i + 1 < len(argv) and re.fullmatch(r"[A-Za-z0-9_.:-]+", argv[i + 1] or ""):
+        safe.extend([a, argv[i + 1]])
+        i += 2
+        continue
+    i += 1
+sys.stdout.write("\x1f".join(safe))
+' 2>/dev/null || true
+}
+
 report() {
   # $1 = state, $2 = optional message
-  local state="$1" msg="${2:-}"
+  local state="$1" msg="${2:-}" extra
   local args=( pane report-agent "$HERDR_PANE_ID"
                --source "$SOURCE" --agent "$AGENT"
                --state "$state" --seq "$SEQ" )
   [ -n "$SESSION_ID" ] && args+=( --agent-session-id "$SESSION_ID" )
   # $msg can contain tool output. It is always one quoted argv element.
   [ -n "$msg" ] && args+=( --message "$msg" )
+  # Herdr relaunches this command in the pane after a server restart.
+  # The first element has to be a plain command name.
+  if [ -n "$SESSION_ID" ]; then
+    args+=( -- cortex )
+    extra=$(resume_flags)
+    if [ -n "$extra" ]; then
+      IFS=$'\x1f' read -r -a extra_flags <<< "$extra"
+      args+=( "${extra_flags[@]}" )
+    fi
+    args+=( --resume "$SESSION_ID" )
+  fi
   herdr_call "${args[@]}"
 }
 

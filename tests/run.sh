@@ -93,13 +93,15 @@ for kind in $kinds; do
   if [ "$kind" = sh ]; then LOG="$T/herdr-coco/events.w1:p1.log"; SEQF="$T/herdr-coco/seq.w1:p1"; else LOG="$T/herdr-coco/events.w1_p1.log"; SEQF="$T/herdr-coco/seq.w1_p1"; fi
   states=$(grep -A1 -x -- '--state' "$ARGV" | grep -vx -e '--state' -e '--' | tr '\n' ' ')
   check "$states" "idle working working working blocked blocked idle idle " "$kind: state sequence"
-  check "$(grep -c '^s1$' "$ARGV")" "7" "$kind: session id on every report"
+  check "$(grep -c '^s1$' "$ARGV")" "14" "$kind: session id on every report and its resume command"
   check "$(grep -c -e '^--evil$' -e '^--state working$' "$ARGV")" "0" "$kind: option-like values dropped from argv"
   check "$(grep -c '^awaiting approval$' "$ARGV")" "1" "$kind: fallback message when tool name rejected"
   check "$(grep -c '^edit$' "$ARGV")" "1" "$kind: tool name as permission message"
   check "$(grep -c '^awaiting input$' "$ARGV")" "0" "$kind: shell-injection notification is not a user question"
   check "$(grep -c 'whoami' "$ARGV")" "0" "$kind: prompt text not sent to Herdr"
-  check "$(grep -c '^w1:p1$' "$ARGV")" "12" "$kind: pane id verbatim"
+  if [ "$kind" = sh ]; then want_panes=19; else want_panes=12; fi
+  check "$(grep -c '^w1:p1$' "$ARGV")" "$want_panes" "$kind: pane id verbatim"
+  check "$(grep -c '^--resume$' "$ARGV")" "7" "$kind: resume command on every report with a session"
   check "$(grep -c '^release-agent$' "$ARGV")" "0" "$kind: SessionEnd does not release while hook parent alive"
   seqs=$(grep -A1 -x -- '--seq' "$ARGV" | grep -vx -e '--seq' -e '--')
   check "$(printf '%s\n' "$seqs" | wc -l | tr -d ' ')" "8" "$kind: one seq per herdr call"
@@ -129,7 +131,8 @@ for kind in $kinds; do
     printf '{"hook_event_name":"PermissionRequest","session_id":"s2","tool_name":"bash","tool_input":{"command":"ls"}}' | env HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_BIN_PATH="$STUB" PATH="$T/bin" "$BASH_BIN" "$R/scripts/herdr-coco-state.sh"
     check "$?" "0" "sh: exit 0 without python3"
     check "$(grep -A1 -x -- '--state' "$ARGV" | tail -1)" "blocked" "sh: state parsed without python3"
-    check "$(grep -c '^s2$' "$ARGV")" "1" "sh: session id parsed without python3"
+    check "$(grep -c '^s2$' "$ARGV")" "2" "sh: session id parsed without python3"
+    check "$(grep -c '^--resume$' "$ARGV")" "1" "sh: resume command without python3"
     check "$(grep -A1 -x -- '--message' "$ARGV" | tail -1)" "bash" "sh: tool name parsed without python3"
     check "$(cat "$SEQF" | wc -c | tr -d ' ')" "13" "sh: 13-digit seq without python3"
   fi
