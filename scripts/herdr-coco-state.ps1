@@ -93,6 +93,52 @@ function Send-Report {
     Invoke-Herdr $a
 }
 
+function Rename-TabFromTitle {
+    # Cortex writes "<title> (cortex)". Copy it onto the tab when the label is
+    # still the process name, a number, or the previous name this pane set.
+    $raw = ''
+    try { $raw = (& $HerdrBin pane get $Pane 2>$null | Out-String) } catch { return }
+    if (-not $raw -or $raw.IndexOf('{') -lt 0) { return }
+    $pane = $null
+    try { $pane = ($raw.Substring($raw.IndexOf('{')) | ConvertFrom-Json).result.pane } catch { return }
+    if ($null -eq $pane) { return }
+    $title = ''
+    if ($pane.terminal_title_stripped) { $title = [string]$pane.terminal_title_stripped }
+    elseif ($pane.terminal_title) { $title = [string]$pane.terminal_title }
+    $title = $title.Trim()
+    $suffix = ' (cortex)'
+    if ($title.EndsWith($suffix)) { $title = $title.Substring(0, $title.Length - $suffix.Length).Trim() }
+    $title = [regex]::Replace($title, '^[^0-9A-Za-z]+', '').Trim()
+    if (-not $title -or $title -eq 'cortex' -or $title -eq 'coco' -or $title.StartsWith('-')) { return }
+    if ($title.Length -gt 48) {
+        $cut = $title.Substring(0, 48)
+        $sp = $cut.LastIndexOf(' ')
+        if ($sp -ge 24) { $title = $cut.Substring(0, $sp).TrimEnd() } else { $title = $cut.TrimEnd() }
+    }
+    $tabId = [string]$pane.tab_id
+    if (-not $tabId) { return }
+    $traw = ''
+    try { $traw = (& $HerdrBin tab get $tabId 2>$null | Out-String) } catch { return }
+    if (-not $traw -or $traw.IndexOf('{') -lt 0) { return }
+    $tab = $null
+    try { $tab = ($traw.Substring($traw.IndexOf('{')) | ConvertFrom-Json).result.tab } catch { return }
+    $label = ''
+    if ($null -ne $tab -and $tab.label) { $label = [string]$tab.label }
+    $lastFile = Join-Path $SeqDir "tabname.$PaneFile"
+    $last = ''
+    try { $last = (Get-Content -LiteralPath $lastFile -Raw).Trim() } catch {}
+    if ($label -eq $title) {
+        try { [IO.File]::WriteAllText($lastFile, $title) } catch {}
+        return
+    }
+    $placeholder = (-not $label) -or ($label -eq 'cortex') -or ($label -eq 'coco') -or ($label -match '^[0-9]+$')
+    if (-not $placeholder -and $label -ne $last) { return }
+    $global:LASTEXITCODE = -1
+    try { & $HerdrBin tab rename $tabId $title *> $null } catch { return }
+    if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { return }
+    try { [IO.File]::WriteAllText($lastFile, $title) } catch {}
+}
+
 function Test-NeedsUserAttention {
     # Notification also carries team-worker lifecycle updates. Only mark the pane
     # blocked when the message asks the user to take an action or answer a question.
@@ -104,8 +150,9 @@ function Test-NeedsUserAttention {
 }
 
 switch ($Event) {
-    'SessionStart' { Send-Report 'idle' }
-    { $_ -in 'UserPromptSubmit', 'PreToolUse', 'PostToolUse' } { Send-Report 'working' }
+    'SessionStart' { Send-Report 'idle'; Rename-TabFromTitle }
+    'UserPromptSubmit' { Send-Report 'working'; Rename-TabFromTitle }
+    { $_ -in 'PreToolUse', 'PostToolUse' } { Send-Report 'working' }
     'PermissionRequest' {
         # Fires when CoCo asks permission to run a tool.
         $m = $ToolName
@@ -122,7 +169,7 @@ switch ($Event) {
             Send-Report 'blocked' 'awaiting input'
         }
     }
-    'Stop' { Send-Report 'idle' }
+    'Stop' { Send-Report 'idle'; Rename-TabFromTitle }
     'SessionEnd' {
         # Cortex fires SessionEnd when a turn ends, while this process is still
         # in the foreground and the prompt is still open. release-agent here
@@ -130,6 +177,7 @@ switch ($Event) {
         # title with "cortex". Herdr clears the row once the process has exited
         # and the pane is back at a shell prompt.
         Send-Report 'idle'
+        Rename-TabFromTitle
     }
     default { }
 }

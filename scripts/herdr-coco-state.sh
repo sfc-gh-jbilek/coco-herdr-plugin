@@ -107,6 +107,83 @@ report() {
   herdr_call "${args[@]}"
 }
 
+# Cortex writes the conversation title as an OSC title, "<title> (cortex)".
+# Herdr shows that title on the tab only after something renames the tab.
+# Until then the label stays the process name, and a workspace with one tab
+# draws the agent row with no title. Rename from the OSC title when the tab
+# still has that placeholder, or still has the name this pane set last.
+rename_tab_from_title() {
+  local raw parsed base tab_id rawtab label lastf last
+  command -v python3 >/dev/null 2>&1 || return 0
+  raw=$("$HERDR_BIN_PATH" pane get "$HERDR_PANE_ID" 2>/dev/null) || return 0
+  [ -n "$raw" ] || return 0
+  parsed=$(printf '%s' "$raw" | python3 -c '
+import json, re, sys
+raw = sys.stdin.read()
+i = raw.find("{")
+if i < 0:
+    sys.exit(0)
+try:
+    d = json.loads(raw[i:])
+except Exception:
+    sys.exit(0)
+p = (d.get("result") or {}).get("pane") or d.get("pane") or {}
+title = (p.get("terminal_title_stripped") or p.get("terminal_title") or "").strip()
+suffix = " (cortex)"
+if title.endswith(suffix):
+    title = title[: -len(suffix)].strip()
+title = re.sub(r"^[^0-9A-Za-z]+", "", title).strip()
+if not title or title.lower() in ("cortex", "coco"):
+    sys.exit(0)
+limit = 48
+if len(title) > limit:
+    cut = title[:limit]
+    sp = cut.rfind(" ")
+    title = (cut[:sp] if sp >= 24 else cut).rstrip()
+tab = p.get("tab_id") or ""
+if not tab or not title or title.startswith("-"):
+    sys.exit(0)
+sys.stdout.write(title + "\x1f" + tab)
+' 2>/dev/null) || return 0
+  [ -n "$parsed" ] || return 0
+  IFS=$'\x1f' read -r base tab_id <<< "$parsed"
+  [ -n "$base" ] && [ -n "$tab_id" ] || return 0
+  rawtab=$("$HERDR_BIN_PATH" tab get "$tab_id" 2>/dev/null) || return 0
+  label=$(printf '%s' "$rawtab" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+i = raw.find("{")
+if i < 0:
+    sys.exit(0)
+try:
+    d = json.loads(raw[i:])
+except Exception:
+    sys.exit(0)
+t = (d.get("result") or {}).get("tab") or d.get("tab") or {}
+sys.stdout.write(t.get("label") or "")
+' 2>/dev/null) || return 0
+  lastf="$SEQ_DIR/tabname.$HERDR_PANE_ID"
+  last=$(cat "$lastf" 2>/dev/null || true)
+  if [ "$label" = "$base" ]; then
+    printf '%s' "$base" > "$lastf" 2>/dev/null || true
+    return 0
+  fi
+  case "$label" in
+    ""|cortex|coco) ;;
+    *)
+      case "$label" in
+        *[!0-9]*) [ "$label" = "$last" ] || return 0 ;;
+      esac
+      ;;
+  esac
+  "$HERDR_BIN_PATH" tab rename "$tab_id" "$base" >/dev/null 2>&1 || {
+    printf '%s   herdr tab rename failed\n' "$(date '+%H:%M:%S')" >> "$LOG_FILE" 2>/dev/null || true
+    return 0
+  }
+  printf '%s' "$base" > "$lastf" 2>/dev/null || true
+  printf '%s   tab rename -> %.80s\n' "$(date '+%H:%M:%S')" "$base" >> "$LOG_FILE" 2>/dev/null || true
+}
+
 needs_user_attention() {
   # Notification also carries team-worker lifecycle updates. Only mark the pane
   # blocked when the message asks the user to take an action or answer a question.
@@ -123,8 +200,9 @@ needs_user_attention() {
 }
 
 case "$EVENT" in
-  SessionStart)                            report idle ;;
-  UserPromptSubmit|PreToolUse|PostToolUse) report working ;;
+  SessionStart)                            report idle; rename_tab_from_title ;;
+  UserPromptSubmit)                        report working; rename_tab_from_title ;;
+  PreToolUse|PostToolUse)                  report working ;;
   PermissionRequest)
       # Fires when CoCo asks permission to run a tool.
       report blocked "${TOOL_NAME:-awaiting approval}" ;;
@@ -141,8 +219,11 @@ case "$EVENT" in
       # in the foreground and the prompt is still open. release-agent here
       # drops the sidebar row, and autorename then replaces the conversation
       # title with "cortex". Herdr clears the row once the process has exited
-      # and the pane is back at a shell prompt.
-      report idle ;;
+      # and the pane is back at a shell prompt. The rename below puts the
+      # conversation title back on the tab when the label is still that
+      # placeholder.
+      report idle
+      rename_tab_from_title ;;
   *) : ;;
 esac
 

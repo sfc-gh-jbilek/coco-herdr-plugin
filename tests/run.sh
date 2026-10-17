@@ -66,7 +66,8 @@ for kind in $kinds; do
   check "$(grep -c '^edit$' "$ARGV")" "1" "$kind: tool name as permission message"
   check "$(grep -c '^awaiting input$' "$ARGV")" "0" "$kind: shell-injection notification is not a user question"
   check "$(grep -c 'whoami' "$ARGV")" "0" "$kind: prompt text not sent to Herdr"
-  check "$(grep -c '^w1:p1$' "$ARGV")" "8" "$kind: pane id verbatim"
+  check "$(grep -c '^w1:p1$' "$ARGV")" "12" "$kind: pane id verbatim"
+  check "$(grep -c '^rename$' "$ARGV")" "0" "$kind: no tab rename without a pane title"
   check "$(grep -c '^release-agent$' "$ARGV")" "0" "$kind: SessionEnd does not release the pane"
   seqs=$(grep -A1 -x -- '--seq' "$ARGV" | grep -vx -e '--seq' -e '--')
   check "$(printf '%s\n' "$seqs" | wc -l | tr -d ' ')" "8" "$kind: one seq per herdr call"
@@ -98,6 +99,35 @@ for kind in $kinds; do
     check "$(grep -c '^s2$' "$ARGV")" "1" "sh: session id parsed without python3"
     check "$(grep -A1 -x -- '--message' "$ARGV" | tail -1)" "bash" "sh: tool name parsed without python3"
     check "$(cat "$SEQF" | wc -c | tr -d ' ')" "13" "sh: 13-digit seq without python3"
+    # Pane title becomes the tab label when the tab is still named "cortex".
+    # A label someone already set is left alone.
+    RT=$(TMPDIR=/tmp mktemp -d); RARGV="$RT/argv.log"; RSTUB="$RT/stub.sh"
+    cat > "$RSTUB" << EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$@" >> "$RARGV"
+printf -- '--\\n' >> "$RARGV"
+if [ "\$1" = pane ] && [ "\$2" = get ]; then
+  printf '%s\\n' '{"result":{"pane":{"terminal_title":"Fix the parser (cortex)","tab_id":"w9:t1"}}}'
+elif [ "\$1" = tab ] && [ "\$2" = get ]; then
+  if [ -f "$RT/named" ]; then
+    printf '%s\\n' '{"result":{"tab":{"label":"Daily Routine"}}}'
+  else
+    printf '%s\\n' '{"result":{"tab":{"label":"cortex"}}}'
+  fi
+fi
+exit 0
+EOF
+    chmod +x "$RSTUB"
+    export TMPDIR="$RT"
+    printf '%s' '{"hook_event_name":"Stop","session_id":"s9"}' | env HERDR_ENV=1 HERDR_PANE_ID=w9:p1 HERDR_BIN_PATH="$RSTUB" "$BASH_BIN" "$R/scripts/herdr-coco-state.sh"
+    check "$?" "0" "sh: exit 0 when renaming the tab"
+    check "$(grep -c '^rename$' "$RARGV")" "1" "sh: placeholder tab is renamed from the OSC title"
+    check "$(grep -c '^Fix the parser$' "$RARGV")" "1" "sh: (cortex) suffix stripped"
+    touch "$RT/named"; : > "$RARGV"
+    printf '%s' '{"hook_event_name":"Stop","session_id":"s9"}' | env HERDR_ENV=1 HERDR_PANE_ID=w9:p1 HERDR_BIN_PATH="$RSTUB" "$BASH_BIN" "$R/scripts/herdr-coco-state.sh"
+    check "$(grep -c '^rename$' "$RARGV")" "0" "sh: an existing tab name is left alone"
+    rm -rf "$RT"
+    export TMPDIR="$T"
   fi
   rm -rf "$T"; unset TMPDIR
  done
